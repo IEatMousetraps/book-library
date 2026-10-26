@@ -615,6 +615,17 @@
     }
     .btn-cancel:hover { opacity: 1; color: var(--cream); border-color: rgba(255,255,255,0.3); }
 
+    /* cover picker */
+    .cover-option {
+      width: 90px; height: 130px; border-radius: 4px; overflow: hidden;
+      border: 2px solid transparent; cursor: pointer; transition: border-color 0.15s, transform 0.15s;
+      background: var(--forest-mid); display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .cover-option img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .cover-option:hover { border-color: var(--sage); transform: scale(1.04); }
+    .cover-option.selected { border-color: var(--amber); box-shadow: 0 0 0 2px var(--amber); }
+
     /* star rating input */
     .star-input { display: flex; gap: 0.2rem; }
     .star-input span {
@@ -848,6 +859,7 @@
       <div class="detail-notes" id="detailNotes" style="display:none;"></div>
       <div class="detail-actions">
         <button class="btn btn-outline btn-sm" id="detailEditBtn">Edit</button>
+        <button class="btn btn-outline btn-sm" id="detailFindCoverBtn" onclick="openCoverPicker()">🖼 Find Cover</button>
       </div>
     </div>
   </div>
@@ -1020,6 +1032,18 @@
 </div>
 
 <!-- ── GOODREADS IMPORT MODAL ── -->
+<!-- ── COVER PICKER MODAL ── -->
+<div class="modal-overlay" id="coverPickerOverlay">
+  <div class="modal" style="max-width:520px;">
+    <h2>Find Cover</h2>
+    <div id="coverPickerStatus" style="font-family:'EB Garamond',serif;font-size:0.95rem;color:var(--sage-pale);line-height:1.7;margin-bottom:1rem;"></div>
+    <div id="coverPickerGrid" style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:1.2rem;justify-content:center;"></div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeCoverPicker()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="importModalOverlay">
   <div class="modal" style="max-width:480px;">
     <h2>Import from Goodreads</h2>
@@ -1597,6 +1621,104 @@ function showToast(msg) {
   t.textContent = msg; t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 2800);
 }
+
+// ── COVER PICKER ─────────────────────────────────────────
+let coverPickerBookId = null;
+
+// Open Library returns covers by OLID, ISBN, or title search
+// We'll try ISBN first (from Goodreads import), then title+author search
+async function fetchOpenLibraryCovers(book) {
+  const covers = [];
+
+  // Try ISBN if the book has one stored (imported books may have it)
+  if (book.isbn) {
+    const isbn = book.isbn.replace(/[^0-9X]/gi, '');
+    if (isbn) {
+      const url = `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`;
+      // Test if the image actually exists
+      const exists = await new Promise(res => {
+        const img = new Image();
+        img.onload  = () => res(true);
+        img.onerror = () => res(false);
+        img.src = url;
+      });
+      if (exists) covers.push({ url, label: 'ISBN match' });
+    }
+  }
+
+  // Search Open Library by title + author for more options
+  try {
+    const q = encodeURIComponent(`${book.title} ${book.author}`);
+    const resp = await fetch(`https://openlibrary.org/search.json?q=${q}&limit=10&fields=cover_i,title,author_name`);
+    const data = await resp.json();
+    for (const doc of (data.docs || [])) {
+      if (doc.cover_i) {
+        const url = `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`;
+        // Avoid duplicates
+        if (!covers.find(c => c.url === url)) {
+          covers.push({ url, label: doc.title });
+        }
+      }
+      if (covers.length >= 6) break;
+    }
+  } catch(e) { console.warn('Open Library search failed', e); }
+
+  return covers;
+}
+
+window.openCoverPicker = async function() {
+  const b = books.find(x => x.id === currentDetailId);
+  if (!b) return;
+  coverPickerBookId = currentDetailId;
+
+  const statusEl = document.getElementById('coverPickerStatus');
+  const gridEl   = document.getElementById('coverPickerGrid');
+  gridEl.innerHTML = '';
+  statusEl.innerHTML = `<span style="opacity:0.6;">Searching Open Library for <em>${esc(b.title)}</em>…</span>`;
+  document.getElementById('coverPickerOverlay').classList.add('open');
+
+  const covers = await fetchOpenLibraryCovers(b);
+
+  if (!covers.length) {
+    statusEl.innerHTML = `<span style="opacity:0.6;">No covers found on Open Library for this title. Try pasting a URL directly in the Edit form.</span>`;
+    return;
+  }
+
+  statusEl.innerHTML = `<span style="opacity:0.7;">Found ${covers.length} cover${covers.length>1?'s':''}. Click one to use it.</span>`;
+
+  covers.forEach(({ url }) => {
+    const div = document.createElement('div');
+    div.className = 'cover-option';
+    div.title = 'Click to use this cover';
+    div.innerHTML = `<img src="${url}" alt="cover" loading="lazy" onerror="this.closest('.cover-option').style.display='none'">`;
+    div.onclick = () => selectCover(url);
+    gridEl.appendChild(div);
+  });
+};
+
+async function selectCover(url) {
+  const b = books.find(x => x.id === coverPickerBookId);
+  if (!b) return;
+  b.coverUrl = url;
+  if (configured) {
+    try {
+      await updateDoc(doc(db, 'books', b.id), { coverUrl: url });
+    } catch(e) { console.error('Cover save error', e); }
+  }
+  closeCoverPicker();
+  renderAll();
+  // Re-open detail so cover shows immediately
+  openDetail(coverPickerBookId);
+  showToast('Cover updated!');
+}
+
+window.closeCoverPicker = function() {
+  document.getElementById('coverPickerOverlay').classList.remove('open');
+  coverPickerBookId = null;
+};
+document.getElementById('coverPickerOverlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeCoverPicker();
+});
 
 // ── GOODREADS IMPORT ─────────────────────────────────────
 let pendingImport = [];
