@@ -698,7 +698,15 @@
     <span class="nav-icon">🃏</span> Discordecke
   </a>
 
-  <div class="sidebar-footer">One more chapter…</div>
+  <div class="sidebar-footer">
+    <div style="margin-bottom:0.7rem;font-style:normal;">
+      <label id="importLabel" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;color:rgba(255,255,255,0.45);font-size:0.78rem;transition:color 0.15s;" onmouseover="this.style.color='rgba(255,255,255,0.75)'" onmouseout="this.style.color='rgba(255,255,255,0.45)'">
+        <span style="font-size:0.85rem;">📥</span> Import from Goodreads
+        <input type="file" id="goodreadsImport" accept=".csv" style="display:none;" />
+      </label>
+    </div>
+    One more chapter…
+  </div>
 </nav>
 
 <!-- ── MAIN ── -->
@@ -1011,6 +1019,24 @@
   </div>
 </div>
 
+<!-- ── GOODREADS IMPORT MODAL ── -->
+<div class="modal-overlay" id="importModalOverlay">
+  <div class="modal" style="max-width:480px;">
+    <h2>Import from Goodreads</h2>
+    <div id="importPreview" style="font-family:'EB Garamond',serif;font-size:0.95rem;color:var(--sage-pale);line-height:1.7;margin-bottom:1.2rem;"></div>
+    <div id="importProgress" style="display:none;">
+      <div style="background:var(--forest-mid);border-radius:99px;height:6px;overflow:hidden;margin-bottom:0.6rem;">
+        <div id="importProgressBar" style="height:100%;background:linear-gradient(90deg,var(--sage),var(--gold));border-radius:99px;transition:width 0.3s;width:0%;"></div>
+      </div>
+      <div id="importProgressLabel" style="font-family:'EB Garamond',serif;font-size:0.85rem;color:var(--sage-pale);opacity:0.7;"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeImportModal()">Cancel</button>
+      <button class="btn btn-primary" id="importConfirmBtn" onclick="confirmImport()">Import</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <!-- ── FIREBASE + APP LOGIC ── -->
@@ -1025,12 +1051,12 @@ import {
 // 🔧 PASTE YOUR FIREBASE CONFIG HERE
 // ──────────────────────────────────────────────────────────
 const firebaseConfig = {
-  apiKey: "AIzaSyC_y42ZY9fCkjNqLe7_8kPw0p5uYi9moYY",
-  authDomain: "book-library-d1468.firebaseapp.com",
-  projectId: "book-library-d1468",
-  storageBucket: "book-library-d1468.firebasestorage.app",
+  apiKey:            "AIzaSyC_y42ZY9fCkjNqLe7_8kPw0p5uYi9moYY",
+  authDomain:        "book-library-d1468.firebaseapp.com",
+  projectId:         "book-library-d1468",
+  storageBucket:     "book-library-d1468.firebasestorage.app",
   messagingSenderId: "703431923250",
-  appId: "1:703431923250:web:a1fb65cd4657aa25340e2b"
+  appId:             "1:703431923250:web:a1fb65cd4657aa25340e2b"
 };
 // ──────────────────────────────────────────────────────────
 
@@ -1571,6 +1597,147 @@ function showToast(msg) {
   t.textContent = msg; t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 2800);
 }
+
+// ── GOODREADS IMPORT ─────────────────────────────────────
+let pendingImport = [];
+
+function parseGoodreadsCSV(text) {
+  const lines = text.split('\n');
+  const headers = parseCSVLine(lines[0]);
+  const idx = h => headers.indexOf(h);
+
+  const statusMap = {
+    'read': 'read',
+    'currently-reading': 'reading',
+    'to-read': 'tbr',
+  };
+  const formatMap = {
+    'hardcover': 'hardcover',
+    'paperback': 'paperback',
+    'ebook': 'ebook',
+    'kindle edition': 'ebook',
+    'audible audio': 'audiobook',
+    'audiobook': 'audiobook',
+  };
+
+  return lines.slice(1).filter(l=>l.trim()).map(line => {
+    const cols = parseCSVLine(line);
+    const shelf = (cols[idx('Exclusive Shelf')]||'').toLowerCase().trim();
+    const binding = (cols[idx('Binding')]||'').toLowerCase().trim();
+    const ratingRaw = parseFloat(cols[idx('My Rating')])||0;
+    // Goodreads uses 0 for unrated; round to nearest integer for our 1-5 system
+    const rating = ratingRaw > 0 ? Math.min(5, Math.round(ratingRaw)) : 0;
+    const dateRead = cols[idx('Date Read')]||'';
+    // Goodreads date format: YYYY/MM/DD → convert to YYYY-MM-DD
+    const dateFinished = dateRead ? dateRead.replace(/\//g,'-') : '';
+
+    return {
+      title:       cols[idx('Title')]||'',
+      author:      cols[idx('Author')]||'',
+      status:      statusMap[shelf] || 'tbr',
+      format:      formatMap[binding] || 'paperback',
+      publisher:   cols[idx('Publisher')]||'',
+      pages:       parseInt(cols[idx('Number of Pages')])||null,
+      year:        parseInt(cols[idx('Year Published')])||null,
+      rating,
+      dateFinished,
+      notes:       cols[idx('My Review')]||'',
+      firstEdition: false,
+      printing:    '',
+      genre:       '',
+      coverUrl:    '',
+      cost:        null,
+    };
+  }).filter(b => b.title);
+}
+
+// Handles quoted fields with commas inside them
+function parseCSVLine(line) {
+  const result = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuote && line[i+1] === '"') { cur += '"'; i++; }
+      else { inQuote = !inQuote; }
+    } else if (ch === ',' && !inQuote) {
+      result.push(cur.trim()); cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  result.push(cur.trim());
+  return result;
+}
+
+document.getElementById('goodreadsImport').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    pendingImport = parseGoodreadsCSV(ev.target.result);
+    const read    = pendingImport.filter(b=>b.status==='read').length;
+    const reading = pendingImport.filter(b=>b.status==='reading').length;
+    const tbr     = pendingImport.filter(b=>b.status==='tbr').length;
+    document.getElementById('importPreview').innerHTML = `
+      Found <strong style="color:var(--amber);">${pendingImport.length} books</strong> in your Goodreads export:<br>
+      <span style="opacity:0.8;">
+        ${read} read &nbsp;·&nbsp; ${reading} currently reading &nbsp;·&nbsp; ${tbr} TBR
+      </span><br><br>
+      <span style="opacity:0.6;font-size:0.88rem;">These will be added to your library. Existing books are not removed.</span>
+    `;
+    document.getElementById('importProgress').style.display = 'none';
+    document.getElementById('importConfirmBtn').disabled = false;
+    document.getElementById('importConfirmBtn').textContent = 'Import';
+    document.getElementById('importModalOverlay').classList.add('open');
+  };
+  reader.readAsText(file);
+  // Reset the input so the same file can be re-imported if needed
+  this.value = '';
+});
+
+window.closeImportModal = function() {
+  document.getElementById('importModalOverlay').classList.remove('open');
+  pendingImport = [];
+};
+document.getElementById('importModalOverlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeImportModal();
+});
+
+window.confirmImport = async function() {
+  if (!pendingImport.length) return;
+  const btn = document.getElementById('importConfirmBtn');
+  btn.disabled = true;
+  const progressWrap = document.getElementById('importProgress');
+  const bar   = document.getElementById('importProgressBar');
+  const label = document.getElementById('importProgressLabel');
+  progressWrap.style.display = 'block';
+
+  if (!configured) {
+    // Local mode: just push into books array
+    pendingImport.forEach(b => books.unshift({id:'gr_'+Date.now()+'_'+Math.random(), ...b}));
+    renderAll();
+    closeImportModal();
+    showToast(`Imported ${pendingImport.length} books.`);
+    return;
+  }
+
+  let done = 0;
+  const total = pendingImport.length;
+  for (const b of pendingImport) {
+    try {
+      await addDoc(booksCol, { ...b, createdAt: Date.now() });
+    } catch(e) { console.error('Import error on', b.title, e); }
+    done++;
+    const pct = Math.round(done/total*100);
+    bar.style.width = pct + '%';
+    label.textContent = `${done} of ${total}…`;
+  }
+
+  await loadAll();
+  closeImportModal();
+  showToast(`Imported ${done} books from Goodreads!`);
+};
 
 // ── INIT ─────────────────────────────────────────────────
 loadAll();
